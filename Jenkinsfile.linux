@@ -1,0 +1,108 @@
+// Jenkinsfile 的 Linux 版本，供 Docker 中的 Jenkins 使用。
+//
+// 仓库里的 Jenkinsfile 是指导书给出的 Windows 版（用 bat 步骤 + Windows 下的 python.exe 路径）。
+// bat 是 Windows 节点专有的步骤，在 Linux 容器里不存在，因此这里换成 sh。
+// Jenkins 项目配置时，把「脚本路径 / Script Path」指向本文件（Jenkinsfile.linux）。
+//
+// 各阶段的划分、顺序、语义与指导书版本保持一致。
+
+pipeline {
+    agent any
+
+    environment {
+        PYTHON_PATH = '/usr/bin/python3'
+    }
+
+    stages {
+        stage('Verify Python Path') {
+            steps {
+                sh '''
+                    echo "=== 验证Python路径及版本 ==="
+                    ${PYTHON_PATH} --version
+                    echo "Python路径验证通过！"
+                '''
+            }
+        }
+
+        stage('Checkout') {
+            steps {
+                git url: 'https://github.com/RelieveJoy/myflaskapp.git', branch: 'main'
+            }
+        }
+
+        stage('Fix pip') {
+            steps {
+                sh '''
+                    echo "=== 修复pip环境 ==="
+                    ${PYTHON_PATH} -m ensurepip --upgrade || true
+                    ${PYTHON_PATH} -m pip --version
+                '''
+            }
+        }
+
+        stage('Install Dependencies') {
+            steps {
+                sh '''
+                    ${PYTHON_PATH} -m pip install --upgrade pip
+                    ${PYTHON_PATH} -m pip install -r requirements.txt
+                '''
+            }
+        }
+
+        stage('Lint') {
+            steps {
+                sh '${PYTHON_PATH} -m pip install flake8 && ${PYTHON_PATH} -m flake8 app.py tests/'
+            }
+        }
+
+        stage('Test') {
+            steps {
+                sh '''
+                    ${PYTHON_PATH} -m pip install pytest
+                    ${PYTHON_PATH} -m pytest --cov=app tests/ --cov-report=html
+                '''
+            }
+            post {
+                always {
+                    publishHTML(target: [
+                        allowMissing: false,
+                        alwaysLinkToLastBuild: false,
+                        keepAll: true,
+                        reportDir: 'htmlcov',
+                        reportFiles: 'index.html',
+                        reportName: 'Coverage Report'
+                    ])
+                }
+            }
+        }
+
+        stage('Build') {
+            steps {
+                sh '''
+                    ${PYTHON_PATH} -m pip install pyinstaller
+                    ${PYTHON_PATH} -m PyInstaller --onefile app.py --noconfirm
+                '''
+            }
+        }
+
+        stage('Deploy') {
+            steps {
+                echo 'Deploying application...'
+                // 先停掉上一次构建遗留的实例，避免 5000 端口冲突，
+                // 再启动并通过 HTTP 请求真实验证服务可用（指导书原版用 start，成功与否无法验证）
+                sh '''
+                    pkill -f "python3 app.py" || true
+                    sleep 1
+                    nohup ${PYTHON_PATH} app.py > app.log 2>&1 &
+                    sleep 3
+                    curl -fsS http://127.0.0.1:5000/ && echo "  <- 部署成功，服务可访问"
+                '''
+            }
+        }
+    }
+
+    post {
+        success { echo 'CI/CD pipeline completed successfully!' }
+        failure { echo 'CI/CD pipeline failed!' }
+    }
+}
